@@ -58,7 +58,6 @@ import {
   newProjectId,
   projectRepository,
   sourceCacheRepository,
-  type ProjectChangeOperation,
   type ProjectDocument,
   type ProjectSnapshot,
   type ProjectSyncState,
@@ -171,11 +170,6 @@ export default function App() {
       seedProject: syncState?.seedProject ? cloneProjectDocument(syncState.seedProject) : createSeedProject(project),
       pendingOperations: [],
     };
-  }
-
-  function enqueueOperations(operations: ProjectChangeOperation[], seedProject?: ProjectDocument | null) {
-    void operations;
-    void seedProject;
   }
 
   async function hydrateProjectOriginalHTML(project: ProjectDocument): Promise<ProjectDocument> {
@@ -445,7 +439,6 @@ export default function App() {
     if (!project) return;
     const seedProject = currentSyncState?.seedProject ?? project;
     const resetProject = cloneProjectDocument(seedProject);
-    enqueueOperations([{ type: "reset-project" }], seedProject);
     adoptModel(cloneBlogModel(resetProject.model));
     setUrl(resetProject.sourceUrl);
     setEditing(null);
@@ -533,11 +526,6 @@ export default function App() {
     setPreviewEditMode(true);
   }
   function commitPreviewEdit() {
-    const before = editModeSnapshotRef.current;
-    const currentProject = buildProjectDocument(currentTimestamp());
-    if (before && model) {
-      enqueueOperations(diffPreviewEdits(before, model), currentProject);
-    }
     editModeSnapshotRef.current = null;
     setPreviewEditMode(false);
   }
@@ -626,10 +614,6 @@ export default function App() {
       if (oldIndex < 0 || newIndex < 0 || oldIndex === newIndex) return;
       const reordered = arrayMove(model.macros, oldIndex, newIndex);
       setModel((m) => (m ? { ...m, macros: reordered } : m));
-      enqueueOperations(
-        [{ type: "reorder-macros", macroIds: reordered.map((macro) => macro.id) }],
-        buildProjectDocument(currentTimestamp())
-      );
       return;
     }
 
@@ -641,8 +625,6 @@ export default function App() {
       const items = macro.items;
       const from = items.findIndex((item) => item.id === activeId);
       if (from < 0) return;
-      const overIsItem = items.some((item) => item.id === overId);
-      const to = overIsItem ? items.findIndex((item) => item.id === overId) : items.length - 1;
       setModel((m) => {
         if (!m) return m;
         const next = cloneModel(m);
@@ -655,16 +637,11 @@ export default function App() {
         macro.items = arrayMove(items, from, to);
         return next;
       });
-      enqueueOperations(
-        [{ type: "move-item", itemId: activeId, toMacroId: container, toIndex: to }],
-        buildProjectDocument(currentTimestamp())
-      );
     }
   }
 
   // ─── Mutations ────────────────────────────────────────────────────────────
   function deleteItem(macroId: string, itemId: string) {
-    const seedProject = buildProjectDocument(currentTimestamp());
     setModel((m) => {
       if (!m) return m;
       const next = cloneModel(m);
@@ -673,7 +650,6 @@ export default function App() {
       macro.items = macro.items.filter((i) => i.id !== itemId);
       return next;
     });
-    enqueueOperations([{ type: "delete-item", macroId, itemId }], seedProject);
   }
   function renameItem(macroId: string, itemId: string) {
     setEditing({ kind: "item", macroId, itemId });
@@ -684,8 +660,6 @@ export default function App() {
 
   function applyEdit(updates: { title: string; bodyHTML: string }) {
     if (!editing) return;
-    const seedProject = buildProjectDocument(currentTimestamp());
-    const operations: ProjectChangeOperation[] = [];
     setModel((m) => {
       if (!m) return m;
       const next = cloneModel(m);
@@ -703,12 +677,6 @@ export default function App() {
         itemN.snippet = (tmp.textContent || "").replace(/\s+/g, " ").trim().slice(0, 220);
         const firstImg = tmp.querySelector("img");
         itemN.imageUrl = firstImg?.getAttribute("src") || undefined;
-        operations.push({
-          type: "update-item",
-          itemId: itemN.id,
-          title: updates.title,
-          bodyHTML: updates.bodyHTML,
-        });
       } else {
         const macroN = next.macros.find((x) => x.id === editing.macroId);
         if (!macroN) return m;
@@ -717,16 +685,9 @@ export default function App() {
           updates.title
         )}</h1>`;
         macroN.introHTML = updates.bodyHTML;
-        operations.push({
-          type: "update-macro",
-          macroId: macroN.id,
-          title: updates.title,
-          introHTML: updates.bodyHTML,
-        });
       }
       return next;
     });
-    enqueueOperations(operations, seedProject);
     setEditing(null);
   }
 
@@ -753,9 +714,6 @@ export default function App() {
   }, [editing, model]);
   function addItem(macroId: string) {
     const it = newItem("New story");
-    const seedProject = buildProjectDocument(currentTimestamp());
-    const currentMacro = model?.macros.find((entry) => entry.id === macroId);
-    const index = currentMacro?.items.length ?? 0;
     setModel((m) => {
       if (!m) return m;
       const next = cloneModel(m);
@@ -763,61 +721,23 @@ export default function App() {
       macro.items.push(it);
       return next;
     });
-    enqueueOperations([{ type: "add-item", macroId, item: it, index }], seedProject);
     // Open the editor immediately so user can add title, body, image, sources
     setEditing({ kind: "item", macroId, itemId: it.id });
   }
   function deleteMacro(macroId: string) {
     if (!window.confirm("Delete the entire section?")) return;
-    const seedProject = buildProjectDocument(currentTimestamp());
     setModel((m) => {
       if (!m) return m;
       return { ...m, macros: m.macros.filter((x) => x.id !== macroId) };
     });
-    enqueueOperations([{ type: "delete-macro", macroId }], seedProject);
   }
   function addMacro() {
     const mac = newMacro("New section");
-    const seedProject = buildProjectDocument(currentTimestamp());
-    const index = model?.macros.length ?? 0;
     setModel((m) => (m ? { ...m, macros: [...m.macros, mac] } : m));
-    enqueueOperations([{ type: "add-macro", macro: mac, index }], seedProject);
     setEditing({ kind: "macro", macroId: mac.id });
   }
   function resetOrder() {
     reloadFromOriginal();
-  }
-
-  function diffPreviewEdits(before: BlogModel, after: BlogModel): ProjectChangeOperation[] {
-    const operations: ProjectChangeOperation[] = [];
-    if (before.header.title !== after.header.title) {
-      operations.push({ type: "set-post-title", title: after.header.title });
-    }
-    for (const afterMacro of after.macros) {
-      const beforeMacro = before.macros.find((macro) => macro.id === afterMacro.id);
-      if (!beforeMacro) continue;
-      if (beforeMacro.title !== afterMacro.title || beforeMacro.introHTML !== afterMacro.introHTML) {
-        operations.push({
-          type: "update-macro",
-          macroId: afterMacro.id,
-          ...(beforeMacro.title !== afterMacro.title ? { title: afterMacro.title } : {}),
-          ...(beforeMacro.introHTML !== afterMacro.introHTML ? { introHTML: afterMacro.introHTML } : {}),
-        });
-      }
-      for (const afterItem of afterMacro.items) {
-        const beforeItem = beforeMacro.items.find((item) => item.id === afterItem.id);
-        if (!beforeItem) continue;
-        if (beforeItem.title !== afterItem.title || beforeItem.bodyHTML !== afterItem.bodyHTML) {
-          operations.push({
-            type: "update-item",
-            itemId: afterItem.id,
-            ...(beforeItem.title !== afterItem.title ? { title: afterItem.title } : {}),
-            ...(beforeItem.bodyHTML !== afterItem.bodyHTML ? { bodyHTML: afterItem.bodyHTML } : {}),
-          });
-        }
-      }
-    }
-    return operations;
   }
 
   // ─── Login & Welcome routing ─────────────────────────────────────────────
