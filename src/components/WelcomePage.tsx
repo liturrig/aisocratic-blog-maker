@@ -21,7 +21,6 @@ type Props = {
   onResume: (project: ProjectDocument) => void;
   onDelete: (project: ProjectDocument) => void;
   onImport: (file: File) => void;
-  sharedSyncReady: boolean;
   onLogout: () => void;
 };
 
@@ -34,7 +33,6 @@ export function WelcomePage({
   onResume,
   onDelete,
   onImport,
-  sharedSyncReady,
   onLogout,
 }: Props) {
   const [url, setUrl] = useState(initialURL);
@@ -80,11 +78,6 @@ export function WelcomePage({
             <p className="text-ink-300 text-sm">
               Start a new project from an AI Socratic URL, or continue a saved one.
             </p>
-            {sharedSyncReady && (
-              <p className="text-ink-400 text-xs mt-3">
-                Saved projects continue syncing automatically in the background.
-              </p>
-            )}
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
@@ -196,7 +189,7 @@ export function WelcomePage({
 
               {savedProjects.length === 0 ? (
                 <div className="flex-1 flex items-center justify-center text-center text-ink-300 text-xs italic border border-dashed border-ink-600 rounded-lg p-8">
-                  Projects are saved automatically in your browser after the first edit and, when available, also sync to the cloud automatically.
+                  Projects are saved automatically in your browser on this device after the first edit.
                 </div>
               ) : (
                 <div className="flex flex-col gap-2 max-h-[360px] overflow-y-auto scroll-thin pr-1">

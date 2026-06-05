@@ -32,9 +32,6 @@ import {
   Check,
   LogOut,
   FileJson,
-  AlertCircle,
-  Cloud,
-  RefreshCw,
 } from "lucide-react";
 import { MacroGroup } from "./components/MacroGroup";
 import { NewsEditor } from "./components/NewsEditor";
@@ -66,21 +63,9 @@ import {
   type ProjectSnapshot,
   type ProjectSyncState,
 } from "./lib/storage";
-import {
-  RemoteStorageConflictError,
-  isRemoteStorageReady,
-  loadRemoteStorageSettings,
-  refreshProjectFromRemote,
-  syncProjectToRemote,
-  type RemoteStorageSettings,
-} from "./lib/remoteSync";
 
 const AUTH_KEY = "aisocratic:auth";
 const LEGACY_AUTH_KEY = "aperitivo:auth";
-const REVISION_DISPLAY_LENGTH = 8;
-const EMPTY_REVISION_PLACEHOLDER = "—";
-const REMOTE_AUTOSAVE_IDLE_MS = 5000;
-const REMOTE_AUTOSAVE_MAX_PENDING_OPERATIONS = 10;
 
 function cloneBlogModel(model: BlogModel): BlogModel {
   if (typeof structuredClone === "function") return structuredClone(model);
@@ -132,15 +117,9 @@ export default function App() {
   const [justSaved, setJustSaved] = useState(false);
   const [savedProjects, setSavedProjects] = useState<ProjectDocument[]>([]);
   const [currentSyncState, setCurrentSyncState] = useState<ProjectSyncState | null>(null);
-  const remoteSettings = useMemo<RemoteStorageSettings>(() => loadRemoteStorageSettings(), []);
-  const [syncBusy, setSyncBusy] = useState<"push" | "pull" | null>(null);
-  const [syncError, setSyncError] = useState<string | null>(null);
-  const [pendingRemoteRefresh, setPendingRemoteRefresh] = useState(false);
   const editModeSnapshotRef = useRef<BlogModel | null>(null);
   const lastOverContainerRef = useRef<string | null>(null);
   const skipNextPreviewRebuild = useRef(false);
-  const flushRemoteChangesRef = useRef<(trigger: "manual" | "auto") => Promise<void>>(async () => {});
-  const backgroundSyncInFlightRef = useRef(false);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -157,63 +136,6 @@ export default function App() {
     [model]
   );
   const hasChanges = orderSignature !== initialMacroOrder && model !== null;
-  const remoteReady = isRemoteStorageReady(remoteSettings);
-  const pendingOperationCount = currentSyncState?.pendingOperations?.length ?? 0;
-  const currentRemoteId = currentSyncState?.remoteId ?? null;
-  const currentRevision = currentSyncState?.revision ?? null;
-  const lastRemoteSyncAt = currentSyncState?.lastSyncedAt ?? null;
-  const localAheadOfRemote =
-    Boolean(currentProjectId && lastSavedAt && (!lastRemoteSyncAt || lastSavedAt > lastRemoteSyncAt));
-  const remoteStatus = useMemo(() => {
-    if (syncBusy === "push") {
-      return {
-        text: "Cloud sync in progress…",
-        className: "text-brand-300",
-      };
-    }
-    if (syncBusy === "pull") {
-      return {
-        text: "Cloud refresh in progress…",
-        className: "text-brand-300",
-      };
-    }
-    if (syncError) {
-      return {
-        text: syncError,
-        className: "text-red-300",
-      };
-    }
-    if (!remoteReady) {
-      return {
-        text: "Cloud sync unavailable",
-        className: "text-ink-300",
-      };
-    }
-    if (!currentRemoteId) {
-      return {
-        text: pendingOperationCount > 0 ? `First sync queued · ${pendingOperationCount} changes` : "Never synced to the cloud",
-        className: "text-ink-300",
-      };
-    }
-    if (pendingOperationCount > 0) {
-      return {
-        text: `Auto-publish queued · ${pendingOperationCount} changes`,
-        className: "text-amber-300",
-      };
-    }
-    if (localAheadOfRemote) {
-      return {
-        text: `Local changes not published · rev ${shortRevision(currentRevision)}`,
-        className: "text-amber-300",
-      };
-    }
-    return {
-      text: `Cloud in sync · rev ${shortRevision(currentRevision)}${
-        lastRemoteSyncAt ? ` · ${formatRelative(lastRemoteSyncAt)}` : ""
-      }`,
-      className: "text-mint",
-    };
-  }, [currentRemoteId, currentRevision, lastRemoteSyncAt, localAheadOfRemote, pendingOperationCount, remoteReady, syncBusy, syncError]);
 
   function buildProjectDocument(savedAt: number): ProjectDocument | null {
     if (!model || !currentProjectId) return null;
@@ -241,47 +163,19 @@ export default function App() {
     return cloneProjectDocument(project);
   }
 
-  /**
-   * Saved projects should be backfilled when they have never reached cloud sync,
-   * still have queued operations, or the local snapshot is newer than the last
-   * successful cloud revision we know about.
-   */
-  function shouldSyncSnapshotInBackground(snapshot: ProjectSnapshot): boolean {
-    const pendingCount = snapshot.syncState?.pendingOperations?.length ?? 0;
-    const lastSyncedAt = snapshot.syncState?.lastSyncedAt ?? null;
-    return !snapshot.syncState?.remoteId || pendingCount > 0 || !lastSyncedAt || snapshot.project.savedAt > lastSyncedAt;
-  }
-
   function ensureSyncState(project: ProjectDocument, syncState?: ProjectSyncState | null): ProjectSyncState {
     return {
-      remoteId: syncState?.remoteId ?? null,
-      revision: syncState?.revision ?? null,
-      lastSyncedAt: syncState?.lastSyncedAt ?? null,
+      remoteId: null,
+      revision: null,
+      lastSyncedAt: null,
       seedProject: syncState?.seedProject ? cloneProjectDocument(syncState.seedProject) : createSeedProject(project),
-      pendingOperations: [...(syncState?.pendingOperations ?? [])],
+      pendingOperations: [],
     };
   }
 
   function enqueueOperations(operations: ProjectChangeOperation[], seedProject?: ProjectDocument | null) {
-    if (operations.length === 0) return;
-    setCurrentSyncState((current) => {
-      const fallbackProject = seedProject ?? buildProjectDocument(currentTimestamp());
-      if (!fallbackProject) return current;
-      const normalized = ensureSyncState(fallbackProject, current);
-      return {
-        ...normalized,
-        pendingOperations: [...(normalized.pendingOperations ?? []), ...operations],
-      };
-    });
-    setSyncError(null);
-  }
-
-  function clearPendingOperations(project: ProjectDocument, syncState?: ProjectSyncState | null): ProjectSyncState {
-    const normalized = ensureSyncState(project, syncState);
-    return {
-      ...normalized,
-      pendingOperations: [],
-    };
+    void operations;
+    void seedProject;
   }
 
   async function hydrateProjectOriginalHTML(project: ProjectDocument): Promise<ProjectDocument> {
@@ -453,125 +347,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, currentProjectId, previewEditMode, authUser]);
 
-  async function flushRemoteChanges(trigger: "manual" | "auto") {
-    if (!model || !currentProjectId || !authUser) return;
-    if (!remoteReady) {
-      if (trigger === "manual") {
-        setSyncError("Cloud sync is not available in this session.");
-      }
-      return;
-    }
-    const now = currentTimestamp();
-    const project = buildProjectDocument(now);
-    if (!project) {
-      setSyncError("Unable to prepare the project for cloud sync.");
-      return;
-    }
-    const syncState = ensureSyncState(project, currentSyncState);
-    const pendingCount = syncState.pendingOperations?.length ?? 0;
-    if (trigger === "auto" && pendingCount === 0) return;
-    if (trigger === "manual" && pendingCount === 0 && syncState.remoteId) {
-      setSyncError(null);
-      return;
-    }
-    const localSnapshot: ProjectSnapshot = {
-      project,
-      syncState,
-    };
-
-    setSyncBusy("push");
-    setSyncError(null);
-    setPendingRemoteRefresh(false);
-
-    try {
-      if (!(await projectRepository.saveProjectSnapshot(authUser, localSnapshot))) {
-        throw new Error("Unable to save the local project before cloud sync.");
-      }
-      const remote = await syncProjectToRemote(remoteSettings, authUser, localSnapshot);
-      await projectRepository.saveProjectSnapshot(authUser, remote.snapshot);
-      setCurrentSyncState(remote.snapshot.syncState ?? null);
-      setLastSavedAt(localSnapshot.project.savedAt);
-      if (trigger === "manual") setJustSaved(true);
-      await refreshSavedProjects(authUser);
-    } catch (e: unknown) {
-      if (e instanceof RemoteStorageConflictError) {
-        setSyncError(e.message);
-      } else {
-        const msg = e instanceof Error ? e.message : String(e);
-        setSyncError(msg);
-      }
-    } finally {
-      setSyncBusy(null);
-    }
-  }
-
-  useEffect(() => {
-    flushRemoteChangesRef.current = flushRemoteChanges;
-  });
-
-  useEffect(() => {
-    if (!model || !currentProjectId || !authUser || !remoteReady) return;
-    if (previewEditMode || syncBusy !== null) return;
-    const pendingCount = currentSyncState?.pendingOperations?.length ?? 0;
-    if (pendingCount === 0) return;
-    // Small queues flush after an idle window so rapid edits collapse into one remote
-    // batch; larger queues flush immediately so long edit bursts don't grow unbounded.
-    const delay = pendingCount >= REMOTE_AUTOSAVE_MAX_PENDING_OPERATIONS ? 0 : REMOTE_AUTOSAVE_IDLE_MS;
-    const timeoutId = setTimeout(() => {
-      void flushRemoteChangesRef.current("auto");
-    }, delay);
-    return () => clearTimeout(timeoutId);
-  }, [
-    authUser,
-    currentProjectId,
-    currentSyncState?.pendingOperations,
-    model,
-    previewEditMode,
-    remoteReady,
-    syncBusy,
-  ]);
-
-  useEffect(() => {
-    const userId = authUser;
-    if (!userId || !remoteReady || currentProjectId !== null || savedProjects.length === 0) return;
-    if (backgroundSyncInFlightRef.current) return;
-
-    let cancelled = false;
-
-    void (async () => {
-      backgroundSyncInFlightRef.current = true;
-      let changed = false;
-
-      try {
-        for (const project of savedProjects) {
-          if (cancelled) return;
-
-          const snapshot = await projectRepository.loadProjectSnapshot(userId, project.id);
-          if (!snapshot || !shouldSyncSnapshotInBackground(snapshot)) continue;
-
-          try {
-            const remote = await syncProjectToRemote(remoteSettings, userId, snapshot);
-            if (cancelled) return;
-            if (await projectRepository.saveProjectSnapshot(userId, remote.snapshot)) {
-              changed = true;
-            }
-          } catch (error) {
-            console.warn("Background cloud sync skipped for saved project", project.id, error);
-          }
-        }
-      } finally {
-        backgroundSyncInFlightRef.current = false;
-        if (!cancelled && changed) {
-          setSavedProjects(await projectRepository.listProjects(userId));
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [authUser, currentProjectId, remoteReady, remoteSettings, savedProjects]);
-
   // Brief "Salvato!" confirmation flash on the Salva button
   useEffect(() => {
     if (!justSaved) return;
@@ -615,8 +390,6 @@ export default function App() {
       setCurrentProjectId(id);
       setCurrentSyncState(syncState);
       setLastSavedAt(now);
-      setSyncError(null);
-      setPendingRemoteRefresh(false);
       adoptModel(parsed);
       await refreshSavedProjects(authUser);
       setUrl(sourceUrl);
@@ -647,8 +420,6 @@ export default function App() {
     setUrl(hydratedProject.sourceUrl);
     setCurrentSyncState(ensureSyncState(hydratedProject, snapshot.syncState));
     setLastSavedAt(hydratedProject.savedAt);
-    setSyncError(null);
-    setPendingRemoteRefresh(false);
     adoptModel(cloneBlogModel(hydratedProject.model));
   }
 
@@ -662,7 +433,6 @@ export default function App() {
       setCurrentProjectId(null);
       setCurrentSyncState(null);
       setLastSavedAt(null);
-      setSyncError(null);
       setModel(null);
       setPreviewURL("");
     }
@@ -692,59 +462,6 @@ export default function App() {
     }
   }
 
-  async function syncNowToRemote() {
-    await flushRemoteChanges("manual");
-  }
-
-  async function executeRefreshFromRemote() {
-    if (!currentProjectId || !authUser) return;
-    if (!remoteReady) {
-      setSyncError("Cloud sync is not available in this session.");
-      return;
-    }
-
-    setSyncBusy("pull");
-    setSyncError(null);
-    setPendingRemoteRefresh(false);
-
-    try {
-      const remote = await refreshProjectFromRemote(
-        remoteSettings,
-        authUser,
-        currentProjectId,
-        model?.baseHref || url,
-        currentSyncState?.remoteId ?? null
-      );
-      const hydratedProject = await hydrateProjectOriginalHTML(remote.snapshot.project);
-      const nextSnapshot: ProjectSnapshot = {
-        project: hydratedProject,
-        syncState: clearPendingOperations(hydratedProject, remote.snapshot.syncState),
-      };
-      if (!(await projectRepository.saveProjectSnapshot(authUser, nextSnapshot))) {
-        throw new Error("Unable to save the version received from the cloud in the browser.");
-      }
-      setCurrentSyncState(nextSnapshot.syncState ?? null);
-      setLastSavedAt(nextSnapshot.project.savedAt);
-      setUrl(nextSnapshot.project.sourceUrl);
-      adoptModel(cloneBlogModel(nextSnapshot.project.model));
-      await refreshSavedProjects(authUser);
-      setError(null);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setSyncError(msg);
-    } finally {
-      setSyncBusy(null);
-    }
-  }
-
-  function refreshFromRemote() {
-    if (localAheadOfRemote) {
-      setPendingRemoteRefresh(true);
-      return;
-    }
-    void executeRefreshFromRemote();
-  }
-
   function handleLogin(username: string) {
     const normalized = normalizeUserId(username);
     try {
@@ -767,8 +484,6 @@ export default function App() {
     setSavedProjects([]);
     setCurrentSyncState(null);
     setLastSavedAt(null);
-    setSyncError(null);
-    setPendingRemoteRefresh(false);
     setModel(null);
     setPreviewURL("");
     setCurrentProjectId(null);
@@ -794,8 +509,6 @@ export default function App() {
       setUrl(project.sourceUrl);
       setCurrentSyncState(ensureSyncState(project, snapshot.syncState));
       setLastSavedAt(project.savedAt);
-      setSyncError(null);
-      setPendingRemoteRefresh(false);
       adoptModel(cloneBlogModel(project.model));
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -807,8 +520,6 @@ export default function App() {
     setMobileActionsOpen(false);
     setCurrentSyncState(null);
     setLastSavedAt(null);
-    setSyncError(null);
-    setPendingRemoteRefresh(false);
     setModel(null);
     setPreviewURL("");
     setCurrentProjectId(null);
@@ -1126,7 +837,6 @@ export default function App() {
         }}
         onDelete={(p) => removeSavedProject(p)}
         onImport={(f) => importFromFile(f)}
-        sharedSyncReady={remoteReady}
         onLogout={handleLogout}
       />
     );
@@ -1189,32 +899,6 @@ export default function App() {
               Saved {formatRelative(lastSavedAt)}
             </span>
           )}
-          {model && (
-            <span className={`text-[11px] flex items-center gap-1.5 mr-1 ${remoteStatus.className}`}>
-              <Cloud size={11} />
-              {remoteStatus.text}
-            </span>
-          )}
-          <button
-            onClick={syncNowToRemote}
-            disabled={!model || syncBusy !== null || !remoteReady}
-            className="px-3 py-2 rounded-lg border border-ink-600 hover:border-brand text-sm flex items-center gap-2 transition disabled:opacity-40 disabled:cursor-not-allowed"
-            title={
-              remoteReady
-                ? "Send the current batch to the cloud right away"
-               : "Cloud sync is not available in this session"
-            }
-          >
-            <Cloud size={13} /> Sync now
-          </button>
-          <button
-            onClick={refreshFromRemote}
-            disabled={!model || syncBusy !== null || !remoteReady}
-            className="px-3 py-2 rounded-lg border border-ink-600 hover:border-brand text-sm flex items-center gap-2 transition disabled:opacity-40 disabled:cursor-not-allowed"
-            title="Reload this project from the published cloud version"
-          >
-            <RefreshCw size={13} className={syncBusy === "pull" ? "animate-spin" : ""} /> Refresh cloud
-          </button>
           <button
             onClick={saveNow}
             disabled={!model}
@@ -1273,45 +957,6 @@ export default function App() {
               {error}
             </div>
           )}
-          {syncError && (
-            <div className="mb-4 p-3 rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-200 text-sm flex items-start gap-2">
-              <AlertCircle size={16} className="mt-0.5 shrink-0" />
-              <span>{syncError}</span>
-            </div>
-          )}
-          {pendingRemoteRefresh && (
-            <div
-              className="mb-4 p-3 rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-100 text-sm"
-              role="alert"
-            >
-              <div className="flex items-start gap-2">
-                <AlertCircle size={16} className="mt-0.5 shrink-0" />
-                <div>
-                  <div className="font-medium">The cloud version will replace local changes that have not been published yet.</div>
-                  <div className="mt-1 text-amber-200">
-                    If you want to keep your current work, use “Sync now” first.
-                  </div>
-                </div>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  onClick={() => setPendingRemoteRefresh(false)}
-                  className="px-3 py-2 rounded-lg border border-ink-600 hover:border-ink-500 text-xs transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => void executeRefreshFromRemote()}
-                  className="px-3 py-2 rounded-lg bg-amber-400 hover:brightness-110 text-ink-950 text-xs font-semibold transition"
-                >
-                  Replace with cloud
-                </button>
-              </div>
-            </div>
-          )}
-
-
-
           {model && (
             <>
               <div className="mb-6 rounded-2xl border border-ink-600 bg-gradient-to-br from-ink-800 to-ink-700 p-4">
@@ -1507,10 +1152,6 @@ export default function App() {
                 Saved {formatRelative(lastSavedAt)}
               </div>
             )}
-            <div className={`text-[11px] flex items-center gap-1.5 px-1 pb-1 ${remoteStatus.className}`}>
-              <Cloud size={11} />
-              {remoteStatus.text}
-            </div>
             <button
               onClick={() => {
                 setMobileActionsOpen(false);
@@ -1519,26 +1160,6 @@ export default function App() {
               className="w-full px-3 py-3 rounded-xl border border-ink-600 hover:border-brand text-sm flex items-center gap-2 transition"
             >
               <History size={14} /> Projects
-            </button>
-            <button
-              onClick={() => {
-                void syncNowToRemote();
-                setMobileActionsOpen(false);
-              }}
-              disabled={!model || syncBusy !== null || !remoteReady}
-              className="w-full px-3 py-3 rounded-xl border border-ink-600 hover:border-brand text-sm flex items-center gap-2 transition disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <Cloud size={13} /> Sync now
-            </button>
-            <button
-              onClick={() => {
-                void refreshFromRemote();
-                setMobileActionsOpen(false);
-              }}
-              disabled={!model || syncBusy !== null || !remoteReady}
-              className="w-full px-3 py-3 rounded-xl border border-ink-600 hover:border-brand text-sm flex items-center gap-2 transition disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <RefreshCw size={13} className={syncBusy === "pull" ? "animate-spin" : ""} /> Refresh cloud
             </button>
             <button
               onClick={() => {
@@ -1658,8 +1279,4 @@ function cloneModel(m: BlogModel): BlogModel {
 }
 function escapeHTML(s: string) {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
-}
-
-function shortRevision(revision: string | null | undefined): string {
-  return revision ? revision.slice(0, REVISION_DISPLAY_LENGTH) : EMPTY_REVISION_PLACEHOLDER;
 }
