@@ -5,6 +5,7 @@ const DB_VERSION = 1;
 const PROJECTS_STORE = "projects";
 const PROJECTS_BY_USER_INDEX = "by-userId";
 const SOURCES_STORE = "source-cache";
+const REMOTE_STORAGE_SYNC_ENABLED = false;
 
 const LEGACY_PROJECT_PREFIX = "aperitivo:project:";
 // v3 wraps the exported payload as `{ project, syncState }` so the shared project
@@ -371,11 +372,25 @@ function resolveProjectSourceUrl(project: {
 
 function normalizeSyncState(syncState?: ProjectSyncState | null): ProjectSyncState | null {
   if (!syncState) return null;
+
+  const seedProject = normalizeSeedProject(syncState.seedProject);
+  if (!REMOTE_STORAGE_SYNC_ENABLED) {
+    return seedProject
+      ? {
+          remoteId: null,
+          revision: null,
+          lastSyncedAt: null,
+          seedProject,
+          pendingOperations: null,
+        }
+      : null;
+  }
+
   return {
     remoteId: typeof syncState.remoteId === "string" ? syncState.remoteId : null,
     revision: typeof syncState.revision === "string" ? syncState.revision : null,
     lastSyncedAt: typeof syncState.lastSyncedAt === "number" ? syncState.lastSyncedAt : null,
-    seedProject: normalizeSeedProject(syncState.seedProject),
+    seedProject,
     pendingOperations: normalizeProjectChangeOperations(syncState.pendingOperations),
   };
 }
